@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto/bls/blst"
 	blsCommon "github.com/ethereum/go-ethereum/crypto/bls/common"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 const (
@@ -178,6 +179,56 @@ func (extraData *HeaderExtraData) Encode(isShillin bool) []byte {
 	rawBytes = append(rawBytes, extraData.Seal[:]...)
 
 	return rawBytes
+}
+
+type extHeaderExtraData struct {
+	Vanity                  [ExtraVanity]byte
+	HasFinalityVote         uint8
+	FinalityVotedValidators FinalityVoteBitSet
+	AggregatedFinalityVotes *blst.Signature `rlp:"nil"`
+	CheckpointValidators    []extValidatorWithBlsPub
+	Seal                    [ExtraSeal]byte
+}
+
+type extValidatorWithBlsPub struct {
+	Address      common.Address
+	BlsPublicKey *blst.PublicKey `rlp:"nil"`
+}
+
+func (extraData *HeaderExtraData) EncodeRLP() ([]byte, error) {
+	enc, err := rlp.EncodeToBytes(&extraData)
+	if err != nil {
+		return nil, err
+	}
+	return enc, nil
+}
+
+func DecodeExtraRLP(enc []byte) (*HeaderExtraData, error) {
+	dec := &extHeaderExtraData{}
+	if err := rlp.DecodeBytes(enc, dec); err != nil {
+		return nil, err
+	}
+	cp := make([]ValidatorWithBlsPub, 0)
+	for _, val := range dec.CheckpointValidators {
+		newVal := ValidatorWithBlsPub{
+			Address: val.Address,
+		}
+		if val.BlsPublicKey != nil {
+			newVal.BlsPublicKey = val.BlsPublicKey
+		}
+		cp = append(cp, newVal)
+	}
+	ret := &HeaderExtraData{
+		Vanity:                  dec.Vanity,
+		HasFinalityVote:         dec.HasFinalityVote,
+		FinalityVotedValidators: dec.FinalityVotedValidators,
+		CheckpointValidators:    cp,
+		Seal:                    dec.Seal,
+	}
+	if dec.AggregatedFinalityVotes != nil {
+		ret.AggregatedFinalityVotes = dec.AggregatedFinalityVotes
+	}
+	return ret, nil
 }
 
 func DecodeExtra(rawBytes []byte, isShillin bool) (*HeaderExtraData, error) {

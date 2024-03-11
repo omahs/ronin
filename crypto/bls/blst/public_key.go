@@ -4,8 +4,11 @@ package blst
 
 import (
 	"fmt"
+	"io"
+
 	"github.com/ethereum/go-ethereum/crypto/bls/common"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/pkg/errors"
 )
@@ -111,4 +114,23 @@ func AggregateMultiplePubkeys(pubkeys []common.PublicKey) common.PublicKey {
 	// and take advantage of multi-threading.
 	agg.Aggregate(mulP1, false)
 	return &PublicKey{p: agg.ToAffine()}
+}
+
+type pkRLP struct {
+	PubKey []byte
+}
+
+func (p *PublicKey) EncodeRLP(w io.Writer) error {
+	return rlp.Encode(w, pkRLP{
+		PubKey: p.Marshal(),
+	})
+}
+
+func (p *PublicKey) DecodeRLP(s *rlp.Stream) error {
+	var pr pkRLP
+	if err := s.Decode(&pr); err != nil {
+		return err
+	}
+	p.p = new(blstPublicKey).Uncompress(pr.PubKey)
+	return nil
 }

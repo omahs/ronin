@@ -5,9 +5,11 @@ package blst
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/ethereum/go-ethereum/crypto/bls/common"
 	"github.com/ethereum/go-ethereum/crypto/rand"
@@ -276,4 +278,23 @@ func (s *Signature) Copy() common.Signature {
 func VerifyCompressed(signature, pub, msg []byte) bool {
 	// Validate signature and PKs since we will uncompress them here
 	return new(blstSignature).VerifyCompressed(signature, true, pub, true, msg, sigDst)
+}
+
+type sigRLP struct {
+	Signature []byte
+}
+
+func (s *Signature) EncodeRLP(w io.Writer) error {
+	return rlp.Encode(w, sigRLP{
+		Signature: s.Marshal(),
+	})
+}
+
+func (sig *Signature) DecodeRLP(s *rlp.Stream) error {
+	var sr sigRLP
+	if err := s.Decode(&sr); err != nil {
+		return err
+	}
+	sig.s = new(blstSignature).Uncompress(sr.Signature)
+	return nil
 }

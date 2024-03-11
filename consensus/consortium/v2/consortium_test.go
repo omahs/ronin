@@ -3,9 +3,11 @@ package v2
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"math/big"
+	mrand "math/rand"
 	"testing"
 	"time"
 
@@ -527,6 +529,149 @@ func TestExtraDataDecode(t *testing.T) {
 
 	if !decodedData.CheckpointValidators[0].BlsPublicKey.Equals(extraData.CheckpointValidators[0].BlsPublicKey) {
 		t.Errorf("Mismatch decoded data")
+	}
+}
+
+func mockExtraData(nVal int, bits uint32) *finality.HeaderExtraData {
+	var (
+		vanity                  = make([]byte, finality.ExtraVanity)
+		hasFinalityVote         uint8
+		finalityVotedValidators finality.FinalityVoteBitSet
+		aggregatedFinalityVotes blsCommon.Signature
+		checkpointValidators    = make([]finality.ValidatorWithBlsPub, 0, nVal)
+		seal                    = make([]byte, finality.ExtraSeal)
+	)
+	ret := &finality.HeaderExtraData{}
+	// as there is 6 fields in total, corresponding to a 6-bit integer.
+	bits = bits % 64
+	
+	// field assignment based on bit set
+	for i := 0; i < 6; i++ {
+		if bits&(1<<i) != 0 {
+			switch i {
+			case 0:
+				rand.Read(vanity)
+				ret.Vanity = [finality.ExtraVanity]byte(vanity)
+			case 1:
+				hasFinalityVote = uint8(mrand.Intn(2))
+				ret.HasFinalityVote = hasFinalityVote
+			case 2:
+				if ret.HasFinalityVote == 1 {
+					finalityVotedValidators = finality.FinalityVoteBitSet(mrand.Uint64())
+					ret.FinalityVotedValidators = finalityVotedValidators
+				}
+			case 3:
+				if ret.HasFinalityVote == 1 {
+					delegated, _ := blst.RandKey()
+					msg := make([]byte, 64)
+					rand.Read(msg)
+					aggregatedFinalityVotes = delegated.Sign(msg)
+					ret.AggregatedFinalityVotes = aggregatedFinalityVotes
+				}
+			case 4:
+				for i := 0; i < nVal; i++ {
+					s, _ := blst.RandKey()                                 // BLS key
+					sk, _ := ecdsa.GenerateKey(crypto.S256(), rand.Reader) // ECDSA sk
+					addr := crypto.PubkeyToAddress(sk.PublicKey)           // Ronin addr
+					val := finality.ValidatorWithBlsPub{
+						Address: addr,
+					}
+					// randomly switch assigning bls pubkey field
+					if mrand.Uint32()%2 == 1 {
+						val.BlsPublicKey = s.PublicKey()
+					}
+					checkpointValidators = append(checkpointValidators, val)
+				}
+				ret.CheckpointValidators = checkpointValidators
+			case 5:
+				rand.Read(seal)
+				ret.Seal = [finality.ExtraSeal]byte(seal)
+			}
+		}
+	}
+	return ret
+}
+
+func TestExtraDataEncodeRLP(t *testing.T) {
+	nVal := 22
+	ext := mockExtraData(nVal, 63) // 63 ~ 111111 in binary, all field must be non-empty
+	t.Logf("len: %v", len(ext.CheckpointValidators))
+	_, err := ext.EncodeRLP()
+	if err != nil {
+		t.Errorf("encode rlp error: %v", err)
+	}
+}
+
+func TestExtraDataDecodeRLP(t *testing.T) {
+	nVals := 22
+	// loop 64 times, equivalent to 64 combinations of 6 bits
+	for i := 0; i < 64; i++ {
+		ext := mockExtraData(nVals, uint32(i))
+		enc, err := ext.EncodeRLP()
+		if err != nil {
+			t.Errorf("encode rlp error: %v", err)
+		}
+		dec, err := finality.DecodeExtraRLP(enc)
+		if err != nil {
+			t.Errorf("decode rlp error: %v", err)
+		}
+		if !bytes.Equal(dec.Vanity[:], ext.Vanity[:]) {
+			t.Errorf("Mismatched decoded data")
+		}
+		if dec.HasFinalityVote != ext.HasFinalityVote {
+			t.Errorf("Mismatch decoded data")
+		}
+		if dec.FinalityVotedValidators != ext.FinalityVotedValidators {
+			t.Errorf("Mismatch decoded data")
+		}
+		if (dec.AggregatedFinalityVotes != nil && ext.AggregatedFinalityVotes == nil) ||
+			(dec.AggregatedFinalityVotes == nil && ext.AggregatedFinalityVotes != nil) {
+			t.Errorf("Mismatch decoded data")
+		}
+		if dec.AggregatedFinalityVotes != nil &&
+			ext.AggregatedFinalityVotes != nil &&
+			!bytes.Equal(dec.AggregatedFinalityVotes.Marshal(), ext.AggregatedFinalityVotes.Marshal()) {
+			t.Errorf("Mismatch decoded data")
+		}
+		if len(dec.CheckpointValidators) != len(ext.CheckpointValidators) {
+			t.Errorf("Mismatch decoded data")
+		}
+		for i := 0; i < len(ext.CheckpointValidators); i++ {
+			if dec.CheckpointValidators[i].Address.Hex() != ext.CheckpointValidators[i].Address.Hex() {
+				t.Errorf("Mismatch decoded data")
+			}
+			if (dec.CheckpointValidators[i].BlsPublicKey == nil && ext.CheckpointValidators[i].BlsPublicKey != nil) ||
+				(dec.CheckpointValidators[i].BlsPublicKey != nil && ext.CheckpointValidators[i].BlsPublicKey == nil) {
+				t.Errorf("Mismatch decoded data")
+			}
+			if dec.CheckpointValidators[i].BlsPublicKey != nil &&
+				ext.CheckpointValidators[i].BlsPublicKey != nil &&
+				!bytes.Equal(dec.CheckpointValidators[i].BlsPublicKey.Marshal(), ext.CheckpointValidators[i].BlsPublicKey.Marshal()) {
+				t.Errorf("Mismatch decoded data")
+			}
+		}
+		if !bytes.Equal(dec.Seal[:], ext.Seal[:]) {
+			t.Errorf("Mismatch decoded data")
+		}
+	}
+}
+
+func BenchmarkEncodeRLP(b *testing.B) {
+	nVal := 22
+	ext := mockExtraData(nVal, 63) // 63 ~ 111111 in binary, all field must be non-empty
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ext.EncodeRLP()
+	}
+}
+
+func BenchmarkDecodeRLP(b *testing.B) {
+	nVal := 22
+	ext := mockExtraData(nVal, 63) // 63 ~ 111111 in binary, all field must be non-empty
+	dec, _ := ext.EncodeRLP()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		finality.DecodeExtraRLP(dec)
 	}
 }
 
